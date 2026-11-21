@@ -9,6 +9,7 @@ import {
   Coins,
   Copy,
   Download,
+  Fingerprint,
   History,
   LayoutDashboard,
   Lock,
@@ -27,6 +28,7 @@ import {
 import { QRCodeSVG } from 'qrcode.react';
 import {
   BLUEPRINT_LIMITS,
+  type BiometricMode,
   type ContactDoc,
   type PaymentRequestDoc,
   type SecurityLogDoc,
@@ -43,17 +45,24 @@ import {
   sanitizeDisplayName,
 } from '../lib/crypto';
 import {
+  checkWebAuthnSupport,
+  enrollBiometricCredential,
+  verifyBiometricCredential,
+  type WebAuthnSupportStatus,
+} from '../lib/webauthn';
+import {
   cancelPaymentRequest,
   claimDemoFaucet,
   createPaymentRequest,
   lookupPaymentRequest,
   lookupWalletByAddress,
+  recordWalletSecurityEvent,
   removeContact,
   saveContact,
   sendP2PCoins,
   updateWalletSettings,
 } from '../services/walletService';
-import { PinVerificationModal } from './PinVerificationModal';
+import { AuthChallengeModal } from './AuthChallengeModal';
 import { ResilientImage } from './ResilientImage';
 import { TransactionReceiptModal } from './TransactionReceiptModal';
 
@@ -65,6 +74,7 @@ interface DashboardWorkspaceProps {
   contacts: ContactDoc[];
   securityLogs: SecurityLogDoc[];
   paymentRequests: PaymentRequestDoc[];
+  onLockWallet: () => void;
   onSignOut: () => void;
 }
 
@@ -86,6 +96,7 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   contacts,
   securityLogs,
   paymentRequests,
+  onLockWallet,
   onSignOut,
 }) => {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('overview');
@@ -109,7 +120,7 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   const [reqLookupInput, setReqLookupInput] = useState('');
   const [activePaymentReq, setActivePaymentReq] = useState<PaymentRequestDoc | null>(null);
   const [sendingTx, setSendingTx] = useState(false);
-  const [pinModalOpen, setPinModalOpen] = useState(false);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
   const [saveAfterSend, setSaveAfterSend] = useState(false);
   const [contactNickname, setContactNickname] = useState('');
 
@@ -130,8 +141,18 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
   const [editAlertThresholdPct, setEditAlertThresholdPct] = useState(
     String(wallet.alertThresholdPct ?? BLUEPRINT_LIMITS.DEFAULT_ALERT_THRESHOLD_PCT)
   );
+  const [biometricDeviceLabel, setBiometricDeviceLabel] = useState(
+    wallet.biometricDeviceLabel || 'Primary Device Passkey'
+  );
+  const [webAuthnSupport, setWebAuthnSupport] = useState<WebAuthnSupportStatus | null>(null);
+  const [enrollingBiometric, setEnrollingBiometric] = useState(false);
   const [logFilter, setLogFilter] = useState<'all' | 'alerts'>('all');
   const [savingSecurity, setSavingSecurity] = useState(false);
+
+  // Detect WebAuthn support
+  useEffect(() => {
+    void checkWebAuthnSupport().then(setWebAuthnSupport);
+  }, []);
 
   // Sync security form values when wallet updates
   useEffect(() => {
@@ -141,11 +162,15 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
     setEditAlertThresholdPct(
       String(wallet.alertThresholdPct ?? BLUEPRINT_LIMITS.DEFAULT_ALERT_THRESHOLD_PCT)
     );
+    if (wallet.biometricDeviceLabel) {
+      setBiometricDeviceLabel(wallet.biometricDeviceLabel);
+    }
   }, [
     wallet.walletName,
     wallet.dailySendLimitCents,
     wallet.alertsEnabled,
     wallet.alertThresholdPct,
+    wallet.biometricDeviceLabel,
   ]);
 
   // Support URL deep-links (?pay=CDC-XXXX-XXXX or ?req=req_...)
@@ -368,12 +393,29 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
       return;
     }
     if (amountCents > dailyRemainingCents) {
-      showToast('error', `Exceeds today's remaining limit (${formatCDC(dailyRemainingCents)}).`);
+      if (alertsEnabled) {
+        const attemptedPct = Math.round(
+          ((sentTodayCents + amountCents) / Math.max(1, wallet.dailySendLimitCents)) * 100
+        );
+        void recordWalletSecurityEvent(
+          user.uid,
+          'limit_alert_exceeded',
+          `Limit exceeded alert: Attempted ${formatCDC(amountCents)} transfer would reach ${attemptedPct}% of ${formatCDC(wallet.dailySendLimitCents)} daily limit.`
+        ).catch(() => {});
+      }
+      showToast(
+        'error',
+        `Exceeds today's remaining limit (${formatCDC(dailyRemainingCents)}). Logged in Security Vault.`
+      );
       return;
     }
 
-    if (wallet.requirePinForSend && wallet.pinHash) {
-      setPinModalOpen(true);
+    const needsSendChallenge =
+      (wallet.requirePinForSend && Boolean(wallet.pinHash)) ||
+      Boolean(wallet.biometricEnabled && wallet.biometricCredentialId);
+
+    if (needsSendChallenge) {
+      setAuthModalOpen(true);
       return;
     }
 
@@ -577,6 +619,142 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
     }
   };
 
+  const handleEnrollBiometric = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const label = biometricDeviceLabel.trim().slice(0, BLUEPRINT_LIMITS.BIOMETRIC_LABEL_MAX) || 'Device Passkey';
+    setEnrollingBiometric(true);
+    try {
+      const { credentialId } = await enrollBiometricCredential({
+        uid: user.uid,
+        email: user.email,
+        displayName: sanitizeDisplayName(user.displayName, user.email),
+      });
+      await updateWalletSettings({
+        wallet,
+        displayName: sanitizeDisplayName(user.displayName, user.email),
+        biometricEnabled: true,
+        biometricCredentialId: credentialId,
+        biometricDeviceLabel: label,
+        requireBiometricForAccess: true,
+        biometricMode: wallet.biometricMode ?? 'either',
+        auditEvent: {
+          eventType: 'biometric_enrolled',
+          summary: `Enrolled WebAuthn biometric passkey (${label}) and enabled wallet access protection.`,
+        },
+      });
+      sessionStorage.setItem(`cdc_unlocked_${user.uid}`, '1');
+      showToast('success', `Biometric passkey "${label}" enrolled successfully.`);
+    } catch (err) {
+      showToast('error', extractFriendlyError(err));
+    } finally {
+      setEnrollingBiometric(false);
+    }
+  };
+
+  const handleRemoveBiometric = async () => {
+    setSavingSecurity(true);
+    try {
+      await updateWalletSettings({
+        wallet,
+        displayName: sanitizeDisplayName(user.displayName, user.email),
+        biometricEnabled: false,
+        biometricCredentialId: '',
+        biometricDeviceLabel: '',
+        requireBiometricForAccess: false,
+        biometricMode: 'either',
+        auditEvent: {
+          eventType: 'biometric_removed',
+          summary: 'Removed WebAuthn biometric passkey and disabled biometric access lock.',
+        },
+      });
+      showToast('success', 'Biometric passkey removed.');
+    } catch (err) {
+      showToast('error', extractFriendlyError(err));
+    } finally {
+      setSavingSecurity(false);
+    }
+  };
+
+  const handleToggleAccessLock = async () => {
+    if (!wallet.biometricEnabled && !wallet.pinHash) {
+      showToast('error', 'Enroll a biometric passkey or set a Security PIN first.');
+      return;
+    }
+    setSavingSecurity(true);
+    try {
+      const next = !wallet.requireBiometricForAccess;
+      await updateWalletSettings({
+        wallet,
+        displayName: sanitizeDisplayName(user.displayName, user.email),
+        requireBiometricForAccess: next,
+        auditEvent: {
+          eventType: 'alert_settings_updated',
+          summary: next
+            ? 'Enabled wallet access verification lock on new sessions.'
+            : 'Disabled wallet access verification lock.',
+        },
+      });
+      if (next) {
+        sessionStorage.setItem(`cdc_unlocked_${user.uid}`, '1');
+      }
+      showToast('success', next ? 'Wallet access lock enabled.' : 'Wallet access lock disabled.');
+    } catch (err) {
+      showToast('error', extractFriendlyError(err));
+    } finally {
+      setSavingSecurity(false);
+    }
+  };
+
+  const handleChangeBiometricMode = async (nextMode: BiometricMode) => {
+    if (nextMode === 'both' && !wallet.pinHash) {
+      showToast('error', 'Set a Security PIN above before enabling Two-Factor (Biometric + PIN) mode.');
+      return;
+    }
+    setSavingSecurity(true);
+    try {
+      await updateWalletSettings({
+        wallet,
+        displayName: sanitizeDisplayName(user.displayName, user.email),
+        biometricMode: nextMode,
+        auditEvent: {
+          eventType: 'biometric_verified',
+          summary:
+            nextMode === 'both'
+              ? 'Updated biometric policy to Additional Layer (Biometric + PIN required).'
+              : 'Updated biometric policy to Alternative Layer (Biometric or PIN).',
+        },
+      });
+      showToast(
+        'success',
+        nextMode === 'both'
+          ? 'Additional security layer enabled (Biometric + PIN).'
+          : 'Alternative security mode enabled (Biometric or PIN).'
+      );
+    } catch (err) {
+      showToast('error', extractFriendlyError(err));
+    } finally {
+      setSavingSecurity(false);
+    }
+  };
+
+  const handleTestBiometric = async () => {
+    if (!wallet.biometricCredentialId) return;
+    setSavingSecurity(true);
+    try {
+      await verifyBiometricCredential(wallet.biometricCredentialId);
+      await recordWalletSecurityEvent(
+        user.uid,
+        'biometric_verified',
+        `Verified WebAuthn passkey (${wallet.biometricDeviceLabel || 'Device Passkey'}).`
+      );
+      showToast('success', 'WebAuthn biometric verification succeeded.');
+    } catch (err) {
+      showToast('error', extractFriendlyError(err));
+    } finally {
+      setSavingSecurity(false);
+    }
+  };
+
   const navItems: { id: WorkspaceTab; label: string; icon: React.ReactNode }[] = [
     { id: 'overview', label: 'Overview', icon: <LayoutDashboard className="w-4 h-4" /> },
     { id: 'send', label: 'Send Coins', icon: <Send className="w-4 h-4" /> },
@@ -635,6 +813,16 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
               )}
             </button>
           </div>
+          {Boolean(wallet.requireBiometricForAccess && (wallet.biometricEnabled || wallet.pinHash)) && (
+            <button
+              type="button"
+              onClick={onLockWallet}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-slate-900 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              Lock Wallet
+            </button>
+          )}
           <button
             type="button"
             onClick={onSignOut}
@@ -1308,11 +1496,15 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                     disabled={sendingTx || !recipientInfo || recipientInfo.isFrozen || wallet.isFrozen}
                     className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold text-white bg-emerald-700 rounded-lg hover:bg-emerald-800 disabled:opacity-50 transition-colors"
                   >
-                    {wallet.requirePinForSend ? <Lock className="w-4 h-4" /> : <Send className="w-4 h-4" />}
+                    {(wallet.requirePinForSend && wallet.pinHash) || wallet.biometricEnabled ? (
+                      <Lock className="w-4 h-4" />
+                    ) : (
+                      <Send className="w-4 h-4" />
+                    )}
                     {sendingTx
                       ? 'Settling P2P Transfer...'
-                      : wallet.requirePinForSend
-                      ? 'Verify PIN & Send Coins'
+                      : (wallet.requirePinForSend && wallet.pinHash) || wallet.biometricEnabled
+                      ? 'Authorize & Send Coins'
                       : 'Send Demo Coins'}
                   </button>
                 </form>
@@ -1847,6 +2039,153 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
                   </div>
                 </form>
 
+                {/* WebAuthn Biometric Authentication Layer */}
+                <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-start gap-3">
+                      <div className="p-2 bg-slate-100 rounded-lg text-slate-900 shrink-0">
+                        <Fingerprint className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h2 className="font-display text-base font-semibold text-slate-900">
+                          Biometric Authentication (WebAuthn)
+                        </h2>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          Use device biometrics or a hardware passkey as an alternative or additional
+                          layer beyond your Security PIN.
+                        </p>
+                      </div>
+                    </div>
+                    <span className="text-xs font-medium text-slate-600 whitespace-nowrap shrink-0">
+                      {wallet.biometricEnabled
+                        ? 'Enrolled'
+                        : webAuthnSupport?.platformAvailable
+                        ? 'Device Ready'
+                        : webAuthnSupport?.supported
+                        ? 'Passkey Ready'
+                        : 'Unsupported'}
+                    </span>
+                  </div>
+
+                  {!wallet.biometricEnabled ? (
+                    <form onSubmit={handleEnrollBiometric} className="space-y-3 pt-2 border-t border-slate-200">
+                      <div className="space-y-1.5">
+                        <label
+                          htmlFor="biometric-device-label"
+                          className="block text-xs font-medium text-slate-700"
+                        >
+                          Device / Authenticator Label
+                        </label>
+                        <input
+                          id="biometric-device-label"
+                          type="text"
+                          maxLength={BLUEPRINT_LIMITS.BIOMETRIC_LABEL_MAX}
+                          value={biometricDeviceLabel}
+                          onChange={(e) => setBiometricDeviceLabel(e.target.value)}
+                          placeholder="e.g., MacBook Touch ID"
+                          className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={enrollingBiometric || webAuthnSupport?.supported === false}
+                        className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50 transition-colors"
+                      >
+                        <Fingerprint className="w-4 h-4" />
+                        {enrollingBiometric ? 'Waiting for Authenticator...' : 'Enroll Biometric Passkey'}
+                      </button>
+                    </form>
+                  ) : (
+                    <div className="space-y-4 pt-2 border-t border-slate-200">
+                      <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs">
+                        <div>
+                          <div className="font-semibold text-slate-900">
+                            {wallet.biometricDeviceLabel || 'Enrolled Passkey'}
+                          </div>
+                          <div className="font-mono text-slate-500 truncate max-w-[240px]">
+                            ID: {wallet.biometricCredentialId?.slice(0, 20)}...
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void handleTestBiometric()}
+                            disabled={savingSecurity}
+                            className="px-3 py-1.5 font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100"
+                          >
+                            Test Prompt
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleRemoveBiometric()}
+                            disabled={savingSecurity}
+                            className="px-3 py-1.5 font-medium text-red-700 bg-white border border-red-200 rounded-lg hover:bg-red-50"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="p-3 border border-slate-200 rounded-lg flex items-center justify-between gap-2">
+                          <div>
+                            <div className="text-xs font-semibold text-slate-900">
+                              Wallet Access Lock
+                            </div>
+                            <div className="text-xs text-slate-500">
+                              Verify when opening wallet
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void handleToggleAccessLock()}
+                            disabled={savingSecurity}
+                            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                              wallet.requireBiometricForAccess
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                : 'bg-slate-100 text-slate-600 border-slate-200'
+                            }`}
+                          >
+                            {wallet.requireBiometricForAccess ? 'Active' : 'Off'}
+                          </button>
+                        </div>
+
+                        <div className="p-3 border border-slate-200 rounded-lg space-y-2">
+                          <div className="text-xs font-semibold text-slate-900">
+                            Policy Mode (vs. PIN)
+                          </div>
+                          <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
+                            <button
+                              type="button"
+                              disabled={savingSecurity}
+                              onClick={() => void handleChangeBiometricMode('either')}
+                              className={`flex-1 px-2 py-1 text-xs font-medium rounded-md transition-colors ${
+                                (wallet.biometricMode ?? 'either') === 'either'
+                                  ? 'bg-white text-slate-900 shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              Alternative (OR)
+                            </button>
+                            <button
+                              type="button"
+                              disabled={savingSecurity}
+                              onClick={() => void handleChangeBiometricMode('both')}
+                              className={`flex-1 px-2 py-1 text-xs font-medium rounded-md transition-colors ${
+                                wallet.biometricMode === 'both'
+                                  ? 'bg-white text-slate-900 shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              Additional (AND)
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 {/* Custom Daily Spending Limit Alerts */}
                 <form
                   onSubmit={handleSaveAlertSettings}
@@ -2071,18 +2410,17 @@ export const DashboardWorkspace: React.FC<DashboardWorkspaceProps> = ({
         </main>
       </div>
 
-      {/* Security PIN Challenge Modal */}
-      <PinVerificationModal
-        isOpen={pinModalOpen}
-        uid={user.uid}
-        expectedPinHash={wallet.pinHash}
+      {/* Biometric / Security PIN Authorization Modal */}
+      <AuthChallengeModal
+        isOpen={authModalOpen}
+        wallet={wallet}
         title="Authorize P2P Transfer"
-        subtitle={`Enter your PIN to send ${sendAmountInput || '0'} CDC to ${recipientInfo?.displayName || 'recipient'}`}
+        subtitle={`Verify your identity to send ${sendAmountInput || '0'} CDC to ${recipientInfo?.displayName || 'recipient'}`}
         onConfirm={() => {
-          setPinModalOpen(false);
+          setAuthModalOpen(false);
           void executeTransfer();
         }}
-        onCancel={() => setPinModalOpen(false)}
+        onCancel={() => setAuthModalOpen(false)}
       />
 
       {/* Transaction Receipt Modal */}

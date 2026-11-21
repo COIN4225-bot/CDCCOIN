@@ -69,6 +69,29 @@
           "type": "integer",
           "description": "Percentage (50-100) of dailySendLimitCents at which an approaching alert triggers."
         },
+        "biometricEnabled": {
+          "type": "boolean",
+          "description": "Whether a WebAuthn passkey/biometric credential is enrolled."
+        },
+        "biometricCredentialId": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Base64url-encoded WebAuthn credential ID."
+        },
+        "biometricDeviceLabel": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "Human-friendly device label for the enrolled authenticator."
+        },
+        "requireBiometricForAccess": {
+          "type": "boolean",
+          "description": "Whether wallet access requires verification on new sessions or manual lock."
+        },
+        "biometricMode": {
+          "type": "string",
+          "enum": ["either", "both"],
+          "description": "Whether biometric acts as an alternative (either) or additional (both) factor alongside PIN."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -286,6 +309,11 @@
             "alert_settings_updated",
             "limit_alert_approaching",
             "limit_alert_exceeded",
+            "biometric_enrolled",
+            "biometric_removed",
+            "biometric_verified",
+            "wallet_locked",
+            "wallet_unlocked",
             "p2p_sent",
             "faucet_claimed"
           ]

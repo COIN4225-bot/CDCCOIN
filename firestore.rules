@@ -54,6 +54,8 @@ service cloud.firestore {
           'dailySendLimitCents', 'dailySentTodayCents', 'lastSentDate',
           'isFrozen', 'requirePinForSend', 'pinHash', 'lastTxId',
           'alertsEnabled', 'alertThresholdPct',
+          'biometricEnabled', 'biometricCredentialId', 'biometricDeviceLabel',
+          'requireBiometricForAccess', 'biometricMode',
           'createdAt', 'updatedAt'
         ])
         && data.ownerUid is string && data.ownerUid == uid && isValidId(data.ownerUid)
@@ -69,6 +71,11 @@ service cloud.firestore {
         && data.lastTxId is string && data.lastTxId.size() <= 128
         && (!('alertsEnabled' in data) || data.alertsEnabled is bool)
         && (!('alertThresholdPct' in data) || (data.alertThresholdPct is int && data.alertThresholdPct >= 50 && data.alertThresholdPct <= 100))
+        && (!('biometricEnabled' in data) || data.biometricEnabled is bool)
+        && (!('biometricCredentialId' in data) || (data.biometricCredentialId is string && data.biometricCredentialId.size() <= 256))
+        && (!('biometricDeviceLabel' in data) || (data.biometricDeviceLabel is string && data.biometricDeviceLabel.size() <= 40))
+        && (!('requireBiometricForAccess' in data) || data.requireBiometricForAccess is bool)
+        && (!('biometricMode' in data) || data.biometricMode in ['either', 'both'])
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -134,6 +141,8 @@ service cloud.firestore {
           'wallet_created', 'pin_updated', 'wallet_frozen',
           'wallet_unfrozen', 'limit_updated', 'alert_settings_updated',
           'limit_alert_approaching', 'limit_alert_exceeded',
+          'biometric_enrolled', 'biometric_removed', 'biometric_verified',
+          'wallet_locked', 'wallet_unlocked',
           'p2p_sent', 'faucet_claimed'
         ]
         && data.summary is string && data.summary.size() >= 3 && data.summary.size() <= 140
@@ -193,7 +202,9 @@ service cloud.firestore {
             isOwner(uid)
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'walletName', 'dailySendLimitCents', 'isFrozen', 'requirePinForSend',
-              'pinHash', 'alertsEnabled', 'alertThresholdPct', 'updatedAt'
+              'pinHash', 'alertsEnabled', 'alertThresholdPct',
+              'biometricEnabled', 'biometricCredentialId', 'biometricDeviceLabel',
+              'requireBiometricForAccess', 'biometricMode', 'updatedAt'
             ])
             && incoming().balanceCents == existing().balanceCents
           )

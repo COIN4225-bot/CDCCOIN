@@ -9,6 +9,7 @@ import {
 } from 'firebase/firestore';
 import {
   BLUEPRINT_LIMITS,
+  type BiometricMode,
   type PaymentRequestDoc,
   type SecurityEventType,
   type WalletDirectoryDoc,
@@ -103,6 +104,11 @@ export async function createWallet(params: CreateWalletParams): Promise<string> 
     lastTxId: '',
     alertsEnabled: true,
     alertThresholdPct,
+    biometricEnabled: false,
+    biometricCredentialId: '',
+    biometricDeviceLabel: '',
+    requireBiometricForAccess: false,
+    biometricMode: 'either' satisfies BiometricMode,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
@@ -184,6 +190,14 @@ export interface ThresholdAlertResult {
 export interface SendP2PResult {
   txId: string;
   thresholdAlert?: ThresholdAlertResult;
+}
+
+export async function recordWalletSecurityEvent(
+  uid: string,
+  eventType: SecurityEventType,
+  summary: string
+): Promise<void> {
+  await writeSecurityLog(uid, eventType, summary);
 }
 
 async function writeSecurityLog(
@@ -418,6 +432,11 @@ export interface UpdateWalletSettingsParams {
   newPin?: string;
   alertsEnabled?: boolean;
   alertThresholdPct?: number;
+  biometricEnabled?: boolean;
+  biometricCredentialId?: string;
+  biometricDeviceLabel?: string;
+  requireBiometricForAccess?: boolean;
+  biometricMode?: BiometricMode;
   auditEvent?: {
     eventType: SecurityEventType;
     summary: string;
@@ -435,6 +454,11 @@ export async function updateWalletSettings(params: UpdateWalletSettingsParams): 
     newPin,
     alertsEnabled,
     alertThresholdPct,
+    biometricEnabled,
+    biometricCredentialId,
+    biometricDeviceLabel,
+    requireBiometricForAccess,
+    biometricMode,
     auditEvent,
   } = params;
 
@@ -480,6 +504,13 @@ export async function updateWalletSettings(params: UpdateWalletSettingsParams): 
   }
 
   const nextFrozen = isFrozen ?? wallet.isFrozen;
+  const nextBiometricEnabled = biometricEnabled ?? wallet.biometricEnabled ?? false;
+  const nextBiometricCredentialId = (biometricCredentialId ?? wallet.biometricCredentialId ?? '').slice(0, 256);
+  const nextBiometricDeviceLabel = (biometricDeviceLabel ?? wallet.biometricDeviceLabel ?? '').trim().slice(0, BLUEPRINT_LIMITS.BIOMETRIC_LABEL_MAX);
+  const nextRequireBiometricForAccess = nextBiometricEnabled
+    ? (requireBiometricForAccess ?? wallet.requireBiometricForAccess ?? false)
+    : false;
+  const nextBiometricMode: BiometricMode = biometricMode ?? wallet.biometricMode ?? 'either';
 
   const batch = writeBatch(db);
   const walletRef = doc(db, 'wallets', wallet.ownerUid);
@@ -493,6 +524,11 @@ export async function updateWalletSettings(params: UpdateWalletSettingsParams): 
     pinHash: nextPinHash,
     alertsEnabled: nextAlertsEnabled,
     alertThresholdPct: nextThresholdPct,
+    biometricEnabled: nextBiometricEnabled,
+    biometricCredentialId: nextBiometricCredentialId,
+    biometricDeviceLabel: nextBiometricDeviceLabel,
+    requireBiometricForAccess: nextRequireBiometricForAccess,
+    biometricMode: nextBiometricMode,
     updatedAt: serverTimestamp(),
   });
 

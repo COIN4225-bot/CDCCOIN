@@ -19,10 +19,13 @@ export const BLUEPRINT_LIMITS = {
   ALERT_THRESHOLD_MIN_PCT: 50,
   ALERT_THRESHOLD_MAX_PCT: 100,
   DEFAULT_ALERT_THRESHOLD_PCT: 80,
+  BIOMETRIC_LABEL_MAX: 40,
   TX_MAX_CENTS: 10000000, // 100,000.00 CDC
   ADDRESS_REGEX: /^CDC-[A-Z0-9]{4}-[A-Z0-9]{4}$/,
   ID_REGEX: /^[a-zA-Z0-9_-]+$/,
 } as const;
+
+export type BiometricMode = 'either' | 'both';
 
 export interface WalletDoc {
   ownerUid: string;
@@ -38,6 +41,11 @@ export interface WalletDoc {
   lastTxId: string;
   alertsEnabled?: boolean;
   alertThresholdPct?: number;
+  biometricEnabled?: boolean;
+  biometricCredentialId?: string;
+  biometricDeviceLabel?: string;
+  requireBiometricForAccess?: boolean;
+  biometricMode?: BiometricMode;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
@@ -87,6 +95,11 @@ export type SecurityEventType =
   | 'alert_settings_updated'
   | 'limit_alert_approaching'
   | 'limit_alert_exceeded'
+  | 'biometric_enrolled'
+  | 'biometric_removed'
+  | 'biometric_verified'
+  | 'wallet_locked'
+  | 'wallet_unlocked'
   | 'p2p_sent'
   | 'faucet_claimed';
 

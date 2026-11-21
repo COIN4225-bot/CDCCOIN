@@ -4,8 +4,10 @@ import { collection, doc, limit, onSnapshot, query, where } from 'firebase/fires
 import { AuthLanding } from './components/AuthLanding';
 import { DashboardWorkspace } from './components/DashboardWorkspace';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { WalletAccessGate } from './components/WalletAccessGate';
 import { WalletOnboarding } from './components/WalletOnboarding';
 import { auth, db, googleProvider, handleFirestoreError, OperationType } from './lib/firebase';
+import { recordWalletSecurityEvent } from './services/walletService';
 import type {
   ContactDoc,
   PaymentRequestDoc,
@@ -22,6 +24,7 @@ function WalletAppContent() {
 
   const [wallet, setWallet] = useState<WalletDoc | null>(null);
   const [walletLoaded, setWalletLoaded] = useState(false);
+  const [sessionUnlocked, setSessionUnlocked] = useState(false);
 
   const [transactions, setTransactions] = useState<TransactionDoc[]>([]);
   const [transactionsLoading, setTransactionsLoading] = useState(true);
@@ -33,9 +36,12 @@ function WalletAppContent() {
     const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
       setUser(nextUser);
       setAuthReady(true);
-      if (!nextUser) {
+      if (nextUser) {
+        setSessionUnlocked(sessionStorage.getItem(`cdc_unlocked_${nextUser.uid}`) === '1');
+      } else {
         setWallet(null);
         setWalletLoaded(false);
+        setSessionUnlocked(false);
         setTransactions([]);
         setContacts([]);
         setSecurityLogs([]);
@@ -176,7 +182,29 @@ function WalletAppContent() {
   };
 
   const handleSignOut = async () => {
+    if (user) {
+      sessionStorage.removeItem(`cdc_unlocked_${user.uid}`);
+    }
     await signOut(auth);
+  };
+
+  const handleUnlockWallet = () => {
+    if (user) {
+      sessionStorage.setItem(`cdc_unlocked_${user.uid}`, '1');
+    }
+    setSessionUnlocked(true);
+  };
+
+  const handleLockWallet = () => {
+    if (user) {
+      sessionStorage.removeItem(`cdc_unlocked_${user.uid}`);
+      void recordWalletSecurityEvent(
+        user.uid,
+        'wallet_locked',
+        'Wallet manually locked; biometric/PIN verification required to re-enter.'
+      ).catch(() => {});
+    }
+    setSessionUnlocked(false);
   };
 
   if (!authReady || (user && !walletLoaded)) {
@@ -205,6 +233,21 @@ function WalletAppContent() {
     return <WalletOnboarding user={user} onSignOut={() => void handleSignOut()} />;
   }
 
+  const requiresAccessUnlock =
+    Boolean(wallet.requireBiometricForAccess) &&
+    Boolean((wallet.biometricEnabled && wallet.biometricCredentialId) || wallet.pinHash);
+
+  if (requiresAccessUnlock && !sessionUnlocked) {
+    return (
+      <WalletAccessGate
+        user={user}
+        wallet={wallet}
+        onUnlock={handleUnlockWallet}
+        onSignOut={() => void handleSignOut()}
+      />
+    );
+  }
+
   return (
     <DashboardWorkspace
       user={user}
@@ -214,6 +257,7 @@ function WalletAppContent() {
       contacts={contacts}
       securityLogs={securityLogs}
       paymentRequests={paymentRequests}
+      onLockWallet={handleLockWallet}
       onSignOut={() => void handleSignOut()}
     />
   );
