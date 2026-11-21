@@ -1,0 +1,6 @@
+{
+  "name": "CDCCoin Wallet",
+  "description": "Send, Receive, aur Manage Demo Coins easily — a secure P2P DemoCoin wallet with instant transfers, QR receive, transaction ledger, and vault security controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

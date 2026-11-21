@@ -1,0 +1,443 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default-deny all paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Primitive Helpers
+    // -------------------------------------------------------------------------
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidAddress(addr) {
+      return addr is string && addr.size() == 13 && addr.matches('^CDC-[A-Z0-9]{4}-[A-Z0-9]{4}$');
+    }
+
+    // -------------------------------------------------------------------------
+    // Validation Blueprints (Anti-Update-Gap)
+    // -------------------------------------------------------------------------
+    function isValidWallet(data, uid) {
+      return data.keys().hasAll([
+          'ownerUid', 'walletAddress', 'walletName', 'balanceCents',
+          'dailySendLimitCents', 'dailySentTodayCents', 'lastSentDate',
+          'isFrozen', 'requirePinForSend', 'pinHash', 'lastTxId',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerUid', 'walletAddress', 'walletName', 'balanceCents',
+          'dailySendLimitCents', 'dailySentTodayCents', 'lastSentDate',
+          'isFrozen', 'requirePinForSend', 'pinHash', 'lastTxId',
+          'alertsEnabled', 'alertThresholdPct',
+          'createdAt', 'updatedAt'
+        ])
+        && data.ownerUid is string && data.ownerUid == uid && isValidId(data.ownerUid)
+        && isValidAddress(data.walletAddress)
+        && data.walletName is string && data.walletName.size() >= 2 && data.walletName.size() <= 40
+        && data.balanceCents is int && data.balanceCents >= 0 && data.balanceCents <= 1000000000
+        && data.dailySendLimitCents is int && data.dailySendLimitCents >= 1000 && data.dailySendLimitCents <= 10000000
+        && data.dailySentTodayCents is int && data.dailySentTodayCents >= 0 && data.dailySentTodayCents <= 10000000
+        && data.lastSentDate is string && data.lastSentDate.size() <= 10 && data.lastSentDate.matches('^(\\d{4}-\\d{2}-\\d{2})?$')
+        && data.isFrozen is bool
+        && data.requirePinForSend is bool
+        && data.pinHash is string && data.pinHash.size() <= 128
+        && data.lastTxId is string && data.lastTxId.size() <= 128
+        && (!('alertsEnabled' in data) || data.alertsEnabled is bool)
+        && (!('alertThresholdPct' in data) || (data.alertThresholdPct is int && data.alertThresholdPct >= 50 && data.alertThresholdPct <= 100))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDirectoryEntry(data) {
+      return data.keys().hasAll([
+          'walletAddress', 'ownerUid', 'displayName', 'walletName', 'isFrozen', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'walletAddress', 'ownerUid', 'displayName', 'walletName', 'isFrozen', 'createdAt', 'updatedAt'
+        ])
+        && isValidAddress(data.walletAddress)
+        && data.ownerUid is string && isValidId(data.ownerUid)
+        && data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 40
+        && data.walletName is string && data.walletName.size() >= 2 && data.walletName.size() <= 40
+        && data.isFrozen is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll([
+          'txId', 'type', 'fromUid', 'fromAddress', 'fromName',
+          'toUid', 'toAddress', 'toName', 'participants',
+          'amountCents', 'note', 'status', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'txId', 'type', 'fromUid', 'fromAddress', 'fromName',
+          'toUid', 'toAddress', 'toName', 'participants',
+          'amountCents', 'note', 'status', 'createdAt'
+        ])
+        && data.txId is string && data.txId.size() >= 4 && isValidId(data.txId)
+        && data.type in ['p2p_transfer', 'faucet_grant']
+        && data.fromUid is string && isValidId(data.fromUid)
+        && isValidAddress(data.fromAddress)
+        && data.fromName is string && data.fromName.size() >= 1 && data.fromName.size() <= 50
+        && data.toUid is string && isValidId(data.toUid)
+        && isValidAddress(data.toAddress)
+        && data.toName is string && data.toName.size() >= 1 && data.toName.size() <= 50
+        && data.participants is list && data.participants.size() == 2
+        && data.participants[0] is string && data.participants[0] == data.fromUid
+        && data.participants[1] is string && data.participants[1] == data.toUid
+        && data.amountCents is int && data.amountCents > 0 && data.amountCents <= 10000000
+        && data.note is string && data.note.size() <= 140
+        && data.status == 'completed'
+        && data.createdAt is timestamp;
+    }
+
+    function isValidContact(data, uid) {
+      return data.keys().hasAll(['ownerUid', 'walletAddress', 'nickname', 'createdAt'])
+        && data.keys().hasOnly(['ownerUid', 'walletAddress', 'nickname', 'createdAt'])
+        && data.ownerUid is string && data.ownerUid == uid && isValidId(data.ownerUid)
+        && isValidAddress(data.walletAddress)
+        && data.nickname is string && data.nickname.size() >= 1 && data.nickname.size() <= 40
+        && data.createdAt is timestamp;
+    }
+
+    function isValidSecurityLog(data, uid) {
+      return data.keys().hasAll(['ownerUid', 'eventType', 'summary', 'createdAt'])
+        && data.keys().hasOnly(['ownerUid', 'eventType', 'summary', 'createdAt'])
+        && data.ownerUid is string && data.ownerUid == uid && isValidId(data.ownerUid)
+        && data.eventType in [
+          'wallet_created', 'pin_updated', 'wallet_frozen',
+          'wallet_unfrozen', 'limit_updated', 'alert_settings_updated',
+          'limit_alert_approaching', 'limit_alert_exceeded',
+          'p2p_sent', 'faucet_claimed'
+        ]
+        && data.summary is string && data.summary.size() >= 3 && data.summary.size() <= 140
+        && data.createdAt is timestamp;
+    }
+
+    function isValidPaymentRequest(data) {
+      return data.keys().hasAll([
+          'reqId', 'requesterUid', 'requesterAddress', 'requesterName',
+          'amountCents', 'memo', 'status', 'paidByUid', 'paidTxId', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'reqId', 'requesterUid', 'requesterAddress', 'requesterName',
+          'amountCents', 'memo', 'status', 'paidByUid', 'paidTxId', 'createdAt', 'updatedAt'
+        ])
+        && data.reqId is string && data.reqId.size() >= 4 && isValidId(data.reqId)
+        && data.requesterUid is string && isValidId(data.requesterUid)
+        && isValidAddress(data.requesterAddress)
+        && data.requesterName is string && data.requesterName.size() >= 1 && data.requesterName.size() <= 40
+        && data.amountCents is int && data.amountCents > 0 && data.amountCents <= 10000000
+        && data.memo is string && data.memo.size() <= 100
+        && data.status in ['open', 'paid', 'cancelled']
+        && data.paidByUid is string && data.paidByUid.size() <= 128
+        && data.paidTxId is string && data.paidTxId.size() <= 128
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection: wallets/{uid}
+    // -------------------------------------------------------------------------
+    match /wallets/{uid} {
+      allow get: if isValidId(uid) && isOwner(uid);
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isValidId(uid)
+        && isOwner(uid)
+        && isValidWallet(incoming(), uid)
+        && incoming().balanceCents == 100000
+        && incoming().dailySentTodayCents == 0
+        && incoming().isFrozen == false
+        && incoming().lastTxId == ''
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(uid)
+        && isValidWallet(incoming(), uid)
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().walletAddress == existing().walletAddress
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Owner updates security / profile settings (balanceCents immutable)
+          (
+            isOwner(uid)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'walletName', 'dailySendLimitCents', 'isFrozen', 'requirePinForSend',
+              'pinHash', 'alertsEnabled', 'alertThresholdPct', 'updatedAt'
+            ])
+            && incoming().balanceCents == existing().balanceCents
+          )
+          ||
+          // Action 2: Owner P2P Send Debit (requires atomic new transaction in same batch)
+          (
+            isOwner(uid)
+            && !existing().isFrozen
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'balanceCents', 'dailySentTodayCents', 'lastSentDate', 'lastTxId', 'updatedAt'
+            ])
+            && incoming().lastTxId != existing().lastTxId
+            && incoming().lastTxId != ''
+            && isValidId(incoming().lastTxId)
+            && incoming().balanceCents >= 0
+            && incoming().balanceCents < existing().balanceCents
+            && incoming().lastSentDate.size() == 10
+            && (
+              (incoming().lastSentDate == existing().lastSentDate
+                && incoming().dailySentTodayCents == existing().dailySentTodayCents + (existing().balanceCents - incoming().balanceCents))
+              ||
+              (incoming().lastSentDate > existing().lastSentDate
+                && incoming().dailySentTodayCents == (existing().balanceCents - incoming().balanceCents))
+            )
+            && incoming().dailySentTodayCents <= existing().dailySendLimitCents
+            && !exists(/databases/$(database)/documents/transactions/$(incoming().lastTxId))
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().lastTxId)).data.type == 'p2p_transfer'
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().lastTxId)).data.fromUid == request.auth.uid
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().lastTxId)).data.amountCents == (existing().balanceCents - incoming().balanceCents)
+          )
+          ||
+          // Action 3: Owner Faucet Grant (+250.00 CDC when balance < 5,000.00 CDC, requires atomic faucet transaction)
+          (
+            isOwner(uid)
+            && !existing().isFrozen
+            && existing().balanceCents < 500000
+            && incoming().diff(existing()).affectedKeys().hasOnly(['balanceCents', 'lastTxId', 'updatedAt'])
+            && incoming().lastTxId != existing().lastTxId
+            && incoming().lastTxId != ''
+            && isValidId(incoming().lastTxId)
+            && incoming().balanceCents == existing().balanceCents + 25000
+            && !exists(/databases/$(database)/documents/transactions/$(incoming().lastTxId))
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().lastTxId)).data.type == 'faucet_grant'
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().lastTxId)).data.toUid == uid
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().lastTxId)).data.amountCents == 25000
+          )
+          ||
+          // Action 4: Counterparty P2P Receive Credit (only via atomic new transaction created by sender)
+          (
+            request.auth.uid != uid
+            && !existing().isFrozen
+            && incoming().diff(existing()).affectedKeys().hasOnly(['balanceCents', 'lastTxId', 'updatedAt'])
+            && incoming().lastTxId != existing().lastTxId
+            && incoming().lastTxId != ''
+            && isValidId(incoming().lastTxId)
+            && !exists(/databases/$(database)/documents/transactions/$(incoming().lastTxId))
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().lastTxId)).data.type == 'p2p_transfer'
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().lastTxId)).data.fromUid == request.auth.uid
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().lastTxId)).data.toUid == uid
+            && incoming().balanceCents == existing().balanceCents + getAfter(/databases/$(database)/documents/transactions/$(incoming().lastTxId)).data.amountCents
+          )
+        );
+
+      allow delete: if false;
+
+      // Subcollection: wallets/{uid}/contacts/{contactId}
+      match /contacts/{contactId} {
+        allow get: if isValidId(uid) && isValidId(contactId) && isOwner(uid)
+          && exists(/databases/$(database)/documents/wallets/$(uid));
+        allow list: if isValidId(uid) && isOwner(uid) && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(uid)
+          && isValidId(contactId)
+          && isOwner(uid)
+          && isValidContact(incoming(), uid)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/wallets/$(uid));
+        allow update: if isVerifiedUser()
+          && isValidId(uid)
+          && isValidId(contactId)
+          && isOwner(uid)
+          && isValidContact(incoming(), uid)
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().walletAddress == existing().walletAddress
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['nickname'])
+          && exists(/databases/$(database)/documents/wallets/$(uid));
+        allow delete: if isVerifiedUser()
+          && isValidId(uid)
+          && isValidId(contactId)
+          && isOwner(uid)
+          && exists(/databases/$(database)/documents/wallets/$(uid));
+      }
+
+      // Subcollection: wallets/{uid}/security_logs/{logId}
+      match /security_logs/{logId} {
+        allow get: if isValidId(uid) && isValidId(logId) && isOwner(uid)
+          && exists(/databases/$(database)/documents/wallets/$(uid));
+        allow list: if isValidId(uid) && isOwner(uid) && resource.data.ownerUid == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(uid)
+          && isValidId(logId)
+          && isOwner(uid)
+          && isValidSecurityLog(incoming(), uid)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/wallets/$(uid));
+        allow update, delete: if false;
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection: wallet_directory/{walletAddress} (PII-Free P2P Lookup)
+    // -------------------------------------------------------------------------
+    match /wallet_directory/{walletAddress} {
+      allow get: if isSignedIn() && isValidAddress(walletAddress);
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isValidAddress(walletAddress)
+        && isValidDirectoryEntry(incoming())
+        && incoming().ownerUid == request.auth.uid
+        && incoming().walletAddress == walletAddress
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidAddress(walletAddress)
+        && isValidDirectoryEntry(incoming())
+        && existing().ownerUid == request.auth.uid
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().walletAddress == existing().walletAddress
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'walletName', 'isFrozen', 'updatedAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection: transactions/{txId} (Immutable Ledger)
+    // -------------------------------------------------------------------------
+    match /transactions/{txId} {
+      allow get: if isSignedIn()
+        && isValidId(txId)
+        && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
+
+      allow list: if isSignedIn() && request.auth.uid in resource.data.participants;
+
+      allow create: if isVerifiedUser()
+        && isValidId(txId)
+        && isValidTransaction(incoming())
+        && incoming().txId == txId
+        && incoming().createdAt == request.time
+        && (
+          // P2P Transfer
+          (
+            incoming().type == 'p2p_transfer'
+            && incoming().fromUid == request.auth.uid
+            && incoming().toUid != request.auth.uid
+            && get(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.walletAddress == incoming().fromAddress
+            && get(/databases/$(database)/documents/wallets/$(incoming().toUid)).data.walletAddress == incoming().toAddress
+            && getAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.lastTxId == txId
+            && getAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.balanceCents == (get(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.balanceCents - incoming().amountCents)
+            && getAfter(/databases/$(database)/documents/wallets/$(incoming().toUid)).data.lastTxId == txId
+            && getAfter(/databases/$(database)/documents/wallets/$(incoming().toUid)).data.balanceCents == (get(/databases/$(database)/documents/wallets/$(incoming().toUid)).data.balanceCents + incoming().amountCents)
+          )
+          ||
+          // Faucet Grant
+          (
+            incoming().type == 'faucet_grant'
+            && incoming().fromUid == 'CDC_TREASURY'
+            && incoming().fromAddress == 'CDC-TRSY-0000'
+            && incoming().toUid == request.auth.uid
+            && incoming().amountCents == 25000
+            && get(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.walletAddress == incoming().toAddress
+            && get(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.balanceCents < 500000
+            && getAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.lastTxId == txId
+            && getAfter(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.balanceCents == (get(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.balanceCents + 25000)
+          )
+        );
+
+      allow update, delete: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection: payment_requests/{reqId}
+    // -------------------------------------------------------------------------
+    match /payment_requests/{reqId} {
+      allow get: if isSignedIn() && isValidId(reqId);
+      allow list: if isSignedIn() && resource.data.requesterUid == request.auth.uid;
+
+      allow create: if isVerifiedUser()
+        && isValidId(reqId)
+        && isValidPaymentRequest(incoming())
+        && incoming().reqId == reqId
+        && incoming().requesterUid == request.auth.uid
+        && incoming().status == 'open'
+        && incoming().paidByUid == ''
+        && incoming().paidTxId == ''
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && get(/databases/$(database)/documents/wallets/$(request.auth.uid)).data.walletAddress == incoming().requesterAddress;
+
+      allow update: if isVerifiedUser()
+        && isValidId(reqId)
+        && isValidPaymentRequest(incoming())
+        && existing().status == 'open'
+        && incoming().reqId == existing().reqId
+        && incoming().requesterUid == existing().requesterUid
+        && incoming().requesterAddress == existing().requesterAddress
+        && incoming().requesterName == existing().requesterName
+        && incoming().amountCents == existing().amountCents
+        && incoming().memo == existing().memo
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Requester cancels open request
+          (
+            existing().requesterUid == request.auth.uid
+            && incoming().status == 'cancelled'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+          ||
+          // Action 2: Payer fulfills open request atomically with P2P transaction
+          (
+            existing().requesterUid != request.auth.uid
+            && incoming().status == 'paid'
+            && incoming().paidByUid == request.auth.uid
+            && incoming().paidTxId != ''
+            && isValidId(incoming().paidTxId)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'paidByUid', 'paidTxId', 'updatedAt'
+            ])
+            && !exists(/databases/$(database)/documents/transactions/$(incoming().paidTxId))
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().paidTxId)).data.type == 'p2p_transfer'
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().paidTxId)).data.fromUid == request.auth.uid
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().paidTxId)).data.toUid == existing().requesterUid
+            && getAfter(/databases/$(database)/documents/transactions/$(incoming().paidTxId)).data.amountCents == existing().amountCents
+          )
+        );
+
+      allow delete: if false;
+    }
+  }
+}
